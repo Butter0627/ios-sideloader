@@ -1,0 +1,26 @@
+name: Sideloader
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "16.0"
+
+targets:
+  Sideloader:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    dependencies:
+      - framework: Frameworks/SideloaderCore.xcframework
+        embed: false
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: CFNetwork.framework
+      - sdk: libz.tbd
+      - sdk: libresolv.tbd
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.sideloader
+        INFOPLIST_FILE: Sources/Info.plist
+        SWIFT_VERSION: "5.0"
+        ENABLE_BITCODE: NO

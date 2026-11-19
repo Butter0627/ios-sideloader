@@ -1,0 +1,4 @@
+module SideloaderCore {
+    header "sideloader_core.h"
+    export *
+}

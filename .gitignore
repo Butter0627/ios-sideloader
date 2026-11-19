@@ -1,0 +1,7 @@
+rust-core/target/
+ios/build/
+ios/Frameworks/
+ios/Payload/
+ios/*.xcodeproj/
+ios/*.ipa
+.DS_Store

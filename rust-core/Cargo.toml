@@ -1,0 +1,14 @@
+[package]
+name = "sideloader-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "sideloader_core"
+crate-type = ["staticlib"]
+
+[dependencies]
+isideload = { version = "0.5.2", default-features = false, features = ["install", "fs-storage", "tokio-mt"] }
+serde = { version = "1", features = ["derive"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
