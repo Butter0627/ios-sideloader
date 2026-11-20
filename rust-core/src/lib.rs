@@ -54,7 +54,7 @@ struct LocalSocketProvider;
 impl idevice::remote_pairing::RpPairingSocketProvider for LocalSocketProvider {
     fn send_plain(
         &mut self,
-        _value: impl serde::Serialize + Send,
+        _value: impl serde::Serialize,
         _tag: usize,
     ) -> Pin<Box<dyn Future<Output = Result<(), idevice::IdeviceError>> + Send>> {
         Box::pin(async move {
