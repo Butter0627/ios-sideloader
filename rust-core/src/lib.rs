@@ -118,11 +118,11 @@ async fn run_remote_pairing(target_plist: PathBuf) -> Result<String, String> {
         "MySideloader-iPhone",
     );
 
-    let mut pairing_file = idevice::remote_pairing::RpPairingFile::default();
+    let mut pairing_file = idevice::remote_pairing::RpPairingFile::generate("MySideloader-iPhone");
 
     client
         .pair(&mut pairing_file, || async {
-            Ok::<String, idevice::IdeviceError>("000000".to_string())
+            "000000".to_string()
         })
         .await
         .map_err(|e| format!("RemotePairingClient::pair 失敗: {e:?}"))?;
