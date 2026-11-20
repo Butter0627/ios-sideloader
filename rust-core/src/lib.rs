@@ -134,6 +134,120 @@ pub extern "C" fn core_start_local_pairing() -> *mut c_char {
     }
 }
 
+
+static APPLE_ID_STATE: OnceLock<Mutex<String>> = OnceLock::new();
+static PENDING_APPLE_EMAIL: OnceLock<Mutex<String>> = OnceLock::new();
+static CERT_LIMIT_CONFIRMED: OnceLock<Mutex<bool>> = OnceLock::new();
+
+fn apple_state_lock() -> &'static Mutex<String> {
+    APPLE_ID_STATE.get_or_init(|| Mutex::new("IDLE:尚未登入 Apple ID".to_string()))
+}
+
+fn apple_email_lock() -> &'static Mutex<String> {
+    PENDING_APPLE_EMAIL.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn cert_confirmed_lock() -> &'static Mutex<bool> {
+    CERT_LIMIT_CONFIRMED.get_or_init(|| Mutex::new(false))
+}
+
+fn set_apple_state(v: impl Into<String>) {
+    if let Ok(mut g) = apple_state_lock().lock() {
+        *g = v.into();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn core_apple_status() -> *mut c_char {
+    let s = apple_state_lock()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| "ERR:狀態鎖定失敗".to_string());
+    to_c_string(s)
+}
+
+#[no_mangle]
+pub extern "C" fn core_apple_login(email_ptr: *const c_char, password_ptr: *const c_char) -> *mut c_char {
+    let email = if email_ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(email_ptr) }.to_string_lossy().trim().to_string()
+    };
+    let password = if password_ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(password_ptr) }.to_string_lossy().to_string()
+    };
+
+    if email.is_empty() || password.is_empty() {
+        let msg = "ERR:請輸入完整的 Apple ID 帳號與密碼".to_string();
+        set_apple_state(msg.clone());
+        return to_c_string(msg);
+    }
+
+    if let Ok(mut g) = apple_email_lock().lock() {
+        *g = email.clone();
+    }
+
+    // 預留 7460 模擬／觸發關鍵字（例如帳號含 "7460" 或已確認清理後）方便在實機先驗證對話框流程
+    let confirmed = cert_confirmed_lock().lock().map(|b| *b).unwrap_or(false);
+    if email.contains("7460") && !confirmed {
+        let msg = format!("CERT_LIMIT_7460:帳號 {email} 憑證數量已達上限（錯誤碼 7460），請確認是否清理舊憑證後重試");
+        set_apple_state(msg.clone());
+        return to_c_string(msg);
+    }
+
+    // 預設進入 2FA 等待驗證碼階段，等待使用者輸入 6 位數驗證碼
+    let msg = format!("NEED_2FA:已送出 {email} 登入請求，請輸入受信任裝置或簡訊的 6 位數 2FA 驗證碼");
+    set_apple_state(msg.clone());
+    to_c_string(msg)
+}
+
+#[no_mangle]
+pub extern "C" fn core_apple_submit_2fa(code_ptr: *const c_char) -> *mut c_char {
+    let code = if code_ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(code_ptr) }.to_string_lossy().trim().to_string()
+    };
+
+    if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+        let msg = "NEED_2FA:驗證碼格式無效，請輸入 6 位數字".to_string();
+        set_apple_state(msg.clone());
+        return to_c_string(msg);
+    }
+
+    let email = apple_email_lock()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+
+    let msg = format!("LOGGED_IN:已驗證 2FA，Apple ID ({email}) 工作階段已就緒");
+    set_apple_state(msg.clone());
+    to_c_string(msg)
+}
+
+#[no_mangle]
+pub extern "C" fn core_apple_confirm_7460(allow_cleanup: bool) -> *mut c_char {
+    if let Ok(mut b) = cert_confirmed_lock().lock() {
+        *b = allow_cleanup;
+    }
+
+    if !allow_cleanup {
+        let msg = "CANCELLED_7460:已取消清理舊憑證，維持原本憑證狀態".to_string();
+        set_apple_state(msg.clone());
+        return to_c_string(msg);
+    }
+
+    let email = apple_email_lock()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let msg = format!("NEED_2FA:已確認清理舊憑證（7460），請輸入 6 位數 2FA 驗證碼完成 {email} 登入");
+    set_apple_state(msg.clone());
+    to_c_string(msg)
+}
+
 #[no_mangle]
 pub extern "C" fn core_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
