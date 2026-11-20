@@ -319,12 +319,87 @@ pub extern "C" fn core_ipa_select(ipa_path_ptr: *const c_char) -> *mut c_char {
     to_c_string(msg)
 }
 
+
+fn parse_app_groups(raw: &str) -> Vec<String> {
+    raw.split(|c: char| c == ',' || c == ';' || c == '\n' || c.is_whitespace())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn prepare_signing_workspace(ipa_path: &PathBuf) -> Result<PathBuf, String> {
+    let base = support_dir_lock()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .ok_or_else(|| "尚未設定 Application Support 儲存目錄".to_string())?;
+
+    let work_dir = base.join("SigningWorkspace");
+    fs::create_dir_all(&work_dir).map_err(|e| format!("建立重簽名工作目錄失敗：{e}"))?;
+
+    let file_name = ipa_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("target.ipa");
+    let staged_ipa = work_dir.join(file_name);
+
+    if ipa_path != &staged_ipa {
+        fs::copy(ipa_path, &staged_ipa).map_err(|e| format!("複製 IPA 至重簽名工作區失敗：{e}"))?;
+    }
+    Ok(staged_ipa)
+}
+
+async fn run_sign_and_install_pipeline(
+    ipa_path: PathBuf,
+    app_groups: Vec<String>,
+    custom_bundle_id: String,
+) -> String {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let staged_ipa = match prepare_signing_workspace(&ipa_path) {
+        Ok(p) => p,
+        Err(e) => return format!("ERR:{e}"),
+    };
+
+    let groups_summary = if app_groups.is_empty() {
+        "無".to_string()
+    } else {
+        app_groups.join(", ")
+    };
+    let bundle_summary = if custom_bundle_id.is_empty() {
+        "維持原始 Bundle ID".to_string()
+    } else {
+        custom_bundle_id.clone()
+    };
+
+    // TODO: 接入 isideload 0.5.2 實際簽名與安裝流程：
+    // 1. 建立 DeveloperSession / SideloaderBuilder（指定 FsStorage 目錄與目前登入帳號）
+    // 2. 注入自訂 Bundle ID 與 App Groups（com.apple.security.application-groups）
+    // 3. 執行重簽名並透過配對連線呼叫安裝流程
+    let pairing_ok = pairing_file_path().map(|p| p.exists()).unwrap_or(false);
+    if !pairing_ok {
+        return format!(
+            "PENDING_PAIRING:已備妥重簽名工作區（IPA: {}｜App Groups: [{}]｜Bundle ID: {}），但尚未取得 pairingFile.plist；完成本機遠端配對後即可執行安裝",
+            staged_ipa.display(),
+            groups_summary,
+            bundle_summary
+        );
+    }
+
+    format!(
+        "SIGNED_QUEUED:已備妥重簽名工作區（IPA: {}｜App Groups: [{}]｜Bundle ID: {}）與配對檔，等待 isideload 簽名／安裝 API 正式串接",
+        staged_ipa.display(),
+        groups_summary,
+        bundle_summary
+    )
+}
+
 #[no_mangle]
 pub extern "C" fn core_ipa_sign_and_install(
     app_group_ptr: *const c_char,
     custom_bundle_id_ptr: *const c_char,
 ) -> *mut c_char {
-    let app_group = if app_group_ptr.is_null() {
+    let raw_app_group = if app_group_ptr.is_null() {
         String::new()
     } else {
         unsafe { CStr::from_ptr(app_group_ptr) }.to_string_lossy().trim().to_string()
@@ -357,29 +432,15 @@ pub extern "C" fn core_ipa_sign_and_install(
         return to_c_string(msg);
     }
 
-    let group_desc = if app_group.is_empty() {
-        "預設（無額外 App Group）".to_string()
-    } else {
-        app_group.clone()
-    };
-    let bundle_desc = if custom_bundle_id.is_empty() {
-        "維持原始 Bundle ID".to_string()
-    } else {
-        custom_bundle_id.clone()
-    };
-
-    let pairing_ok = pairing_file_path().map(|p| p.exists()).unwrap_or(false);
-    if !pairing_ok {
-        let msg = format!(
-            "PENDING_PAIRING:重簽名參數已準備（IPA: {ipa_path}｜App Group: {group_desc}｜Bundle ID: {bundle_desc}），但尚未找到有效 pairingFile.plist；請先完成本機遠端配對後再執行安裝"
-        );
+    let Some(rt) = runtime_ref() else {
+        let msg = "ERR:Tokio 執行緒池未初始化".to_string();
         set_ipa_state(msg.clone());
         return to_c_string(msg);
-    }
+    };
 
-    let msg = format!(
-        "SIGNED_QUEUED:已準備 isideload 重簽名（含 App Group: {group_desc}、{bundle_desc}）並排入安裝佇列"
-    );
-    set_ipa_state(msg.clone());
-    to_c_string(msg)
+    let app_groups = parse_app_groups(&raw_app_group);
+    let path_obj = PathBuf::from(ipa_path);
+    let result_msg = rt.block_on(run_sign_and_install_pipeline(path_obj, app_groups, custom_bundle_id));
+    set_ipa_state(result_msg.clone());
+    to_c_string(result_msg)
 }
