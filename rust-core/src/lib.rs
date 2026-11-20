@@ -46,6 +46,10 @@ fn set_pairing_state(msg: impl Into<String>) {
     }
 }
 
+struct LocalSocketProvider;
+
+impl idevice::remote_pairing::RpPairingSocketProvider for LocalSocketProvider {}
+
 async fn run_remote_pairing(target_plist: PathBuf) -> Result<String, String> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -53,13 +57,12 @@ async fn run_remote_pairing(target_plist: PathBuf) -> Result<String, String> {
         fs::create_dir_all(parent).map_err(|e| format!("建立目錄失敗: {e}"))?;
     }
 
-    // 測試 idevice::remote_pairing 模組型別與可存取性
-    let pairing_file_type = std::any::type_name::<idevice::remote_pairing::PairingFile>();
+    let pairing_file_type = std::any::type_name::<idevice::remote_pairing::RpPairingFile>();
     let remote_pairing_client_type =
-        std::any::type_name::<idevice::remote_pairing::RemotePairingClient>();
+        std::any::type_name::<idevice::remote_pairing::RemotePairingClient<LocalSocketProvider>>();
 
     Ok(format!(
-        "idevice::remote_pairing 型別檢查通過：\n- PairingFile: {pairing_file_type}\n- RemotePairingClient: {remote_pairing_client_type}\n- 目標配對檔: {}",
+        "idevice 0.1.68 型別檢查通過：\n- RpPairingFile: {pairing_file_type}\n- RemotePairingClient: {remote_pairing_client_type}\n- 目標配對檔: {}",
         target_plist.display()
     ))
 }
