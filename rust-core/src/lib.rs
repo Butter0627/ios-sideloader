@@ -59,7 +59,7 @@ impl idevice::remote_pairing::RpPairingSocketProvider for LocalSocketProvider {
     ) -> Pin<Box<dyn Future<Output = Result<(), idevice::IdeviceError>> + Send>> {
         Box::pin(async move {
             Err(idevice::IdeviceError::InternalError(
-                "LocalSocketProvider 尚未接上本機 Socket".to_string(),
+                "LocalSocketProvider 尚未接上本機 Socket 傳送".to_string(),
             ))
         })
     }
@@ -71,7 +71,7 @@ impl idevice::remote_pairing::RpPairingSocketProvider for LocalSocketProvider {
     ) -> Pin<Box<dyn Future<Output = Result<(), idevice::IdeviceError>> + Send>> {
         Box::pin(async move {
             Err(idevice::IdeviceError::InternalError(
-                "LocalSocketProvider 尚未接上加密 Socket".to_string(),
+                "LocalSocketProvider 尚未接上加密 Socket 傳送".to_string(),
             ))
         })
     }
@@ -81,7 +81,7 @@ impl idevice::remote_pairing::RpPairingSocketProvider for LocalSocketProvider {
     ) -> Pin<Box<dyn Future<Output = Result<plist::Value, idevice::IdeviceError>> + Send + 'a>> {
         Box::pin(async move {
             Err(idevice::IdeviceError::InternalError(
-                "LocalSocketProvider 尚未接上接收 Socket".to_string(),
+                "LocalSocketProvider 尚未接上 Socket 接收".to_string(),
             ))
         })
     }
@@ -98,19 +98,35 @@ impl idevice::remote_pairing::RpPairingSocketProvider for LocalSocketProvider {
     }
 }
 
-async fn run_remote_pairing(target_plist: PathBuf) -> Result<String, String> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
+fn save_pairing_file(
+    target_plist: &PathBuf,
+    pairing_file: &idevice::remote_pairing::RpPairingFile,
+) -> Result<(), String> {
     if let Some(parent) = target_plist.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("建立目錄失敗: {e}"))?;
     }
+    plist::to_file_xml(target_plist, pairing_file)
+        .map_err(|e| format!("寫入 pairingFile.plist 失敗: {e}"))?;
+    Ok(())
+}
 
-    let pairing_file_type = std::any::type_name::<idevice::remote_pairing::RpPairingFile>();
-    let remote_pairing_client_type =
-        std::any::type_name::<idevice::remote_pairing::RemotePairingClient<LocalSocketProvider>>();
+async fn run_remote_pairing(target_plist: PathBuf) -> Result<String, String> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let mut client = idevice::remote_pairing::RemotePairingClient::new(
+        LocalSocketProvider,
+        "MySideloader-iPhone".to_string(),
+    );
+
+    let pairing_file: idevice::remote_pairing::RpPairingFile = client
+        .pair()
+        .await
+        .map_err(|e| format!("RemotePairingClient::pair 失敗: {e:?}"))?;
+
+    save_pairing_file(&target_plist, &pairing_file)?;
 
     Ok(format!(
-        "idevice 0.1.68 SocketProvider 骨架編譯通過：\n- RpPairingFile: {pairing_file_type}\n- RemotePairingClient: {remote_pairing_client_type}\n- 目標配對檔: {}",
+        "本機遠端配對成功，已儲存配對檔: {}",
         target_plist.display()
     ))
 }
@@ -172,7 +188,7 @@ pub extern "C" fn core_start_local_pairing() -> *mut c_char {
         return to_c_string("錯誤：Tokio 執行緒池未初始化".to_string());
     };
 
-    set_pairing_state("配對測試執行中...");
+    set_pairing_state("配對流程執行中...");
 
     let res = rt.block_on(run_remote_pairing(target_plist));
     match res {
@@ -181,7 +197,7 @@ pub extern "C" fn core_start_local_pairing() -> *mut c_char {
             to_c_string(msg)
         }
         Err(err) => {
-            let err_msg = format!("配對測試失敗：{err}");
+            let err_msg = format!("配對失敗：{err}");
             set_pairing_state(err_msg.clone());
             to_c_string(err_msg)
         }
