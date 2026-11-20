@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct ContentView: View {
+    @State private var showIPASigner = false
+
     @State private var showAppleLogin = false
 
     @State private var coreStatus: String = "尚未初始化"
@@ -19,6 +21,15 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.borderedProminent)
+            .padding(.horizontal)
+
+            Button {
+                showIPASigner = true
+            } label: {
+                Label("選取 IPA / App Group 重簽名與安裝", systemImage: "app.badge.checkmark")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.bordered)
             .padding(.horizontal)
 
                     Section("核心引擎狀態 (Stage 1)") {
@@ -91,6 +102,10 @@ struct ContentView: View {
     
         .sheet(isPresented: $showAppleLogin) {
             AppleIDLoginView()
+        }
+
+        .sheet(isPresented: $showIPASigner) {
+            IPASignerInstallView()
         }
     }
 }
