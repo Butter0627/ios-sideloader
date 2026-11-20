@@ -1,6 +1,18 @@
 import Foundation
 import SideloaderCore
 
+@_silgen_name("core_ipa_status")
+private func core_ipa_status() -> UnsafeMutablePointer<CChar>?
+
+@_silgen_name("core_ipa_select")
+private func core_ipa_select(_ ipa_path_ptr: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+
+@_silgen_name("core_ipa_sign_and_install")
+private func core_ipa_sign_and_install(
+    _ app_group_ptr: UnsafePointer<CChar>?,
+    _ custom_bundle_id_ptr: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+
 enum CoreBridge {
     private static func consume(_ ptr: UnsafeMutablePointer<CChar>?, fallback: String) -> String {
         guard let ptr else { return fallback }
