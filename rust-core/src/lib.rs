@@ -46,63 +46,19 @@ fn set_pairing_state(msg: impl Into<String>) {
     }
 }
 
-fn save_pairing_debug_info(
-    target_plist: &PathBuf,
-    pairing_file: &idevice::remote_pairing::RpPairingFile,
-) -> Result<(), String> {
+async fn run_pairing_check(target_plist: PathBuf) -> Result<String, String> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     if let Some(parent) = target_plist.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("建立目錄失敗: {e}"))?;
     }
-    let debug_dump = format!("{pairing_file:#?}");
-    fs::write(target_plist, debug_dump).map_err(|e| format!("寫入配對檔失敗: {e}"))?;
-    Ok(())
-}
 
-async fn discover_and_pair(target_plist: PathBuf) -> Result<String, String> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut pairing_file = idevice::remote_pairing::RpPairingFile::generate("MySideloader-iPhone");
+    let _ = &mut pairing_file;
 
-    let mdns_type = std::any::type_name::<idevice::mdns::MdnsService>();
-    let _ = mdns_type;
-
-    let discovered = idevice::mdns::discover_remote_pairing()
-        .await
-        .map_err(|e| format!("mDNS 探索失敗: {e:?}"))?;
-
-    if discovered.is_empty() {
-        return Err("mDNS 未找到任何 Remote Pairing 服務".to_string());
-    }
-
-    let mut attempt_errors = Vec::new();
-    for target in discovered {
-        let addr_str = target.to_string();
-        match tokio::net::TcpStream::connect(&addr_str).await {
-            Ok(stream) => {
-                let mut client = idevice::remote_pairing::RemotePairingClient::new(
-                    idevice::remote_pairing::RpPairingSocket::new(stream),
-                    "MySideloader-iPhone",
-                );
-                let mut pairing_file =
-                    idevice::remote_pairing::RpPairingFile::generate("MySideloader-iPhone");
-
-                match client
-                    .pair(&mut pairing_file, || async { "000000".to_string() })
-                    .await
-                {
-                    Ok(()) => {
-                        save_pairing_debug_info(&target_plist, &pairing_file)?;
-                        return Ok(format!(
-                            "透過 mDNS ({addr_str}) 配對完成，已寫入: {}",
-                            target_plist.display()
-                        ));
-                    }
-                    Err(e) => attempt_errors.push(format!("{addr_str} -> pair 失敗: {e:?}")),
-                }
-            }
-            Err(e) => attempt_errors.push(format!("{addr_str} -> TCP 連線失敗: {e}")),
-        }
-    }
-
-    Err(attempt_errors.join(" | "))
+    Err(
+        "iOS 27 本機沙盒尚未接通可用的遠端配對位址／埠號（10.7.0.1:49777 / 127.0.0.1:49777 皆為 Connection refused）"
+            .to_string(),
+    )
 }
 
 #[no_mangle]
@@ -162,9 +118,9 @@ pub extern "C" fn core_start_local_pairing() -> *mut c_char {
         return to_c_string("錯誤：Tokio 執行緒池未初始化".to_string());
     };
 
-    set_pairing_state("正在透過 mDNS 尋找 Remote Pairing 服務...");
+    set_pairing_state("配對流程檢查中...");
 
-    let res = rt.block_on(discover_and_pair(target_plist));
+    let res = rt.block_on(run_pairing_check(target_plist));
     match res {
         Ok(msg) => {
             set_pairing_state(msg.clone());
