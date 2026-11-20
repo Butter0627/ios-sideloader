@@ -22,6 +22,13 @@
     <string>1</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>需要區域網路權限以透過 LocalDevVPN 與本機開發者服務建立遠端配對與安裝 IPA。</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_remotepairing-pairable-host._tcp</string>
+        <string>_remoted._tcp</string>
+    </array>
     <key>UILaunchScreen</key>
     <dict/>
     <key>UISupportedInterfaceOrientations</key>
