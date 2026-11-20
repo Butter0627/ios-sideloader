@@ -256,3 +256,130 @@ pub extern "C" fn core_free_string(ptr: *mut c_char) {
         }
     }
 }
+
+
+static IPA_STATE: OnceLock<Mutex<String>> = OnceLock::new();
+static SELECTED_IPA_PATH: OnceLock<Mutex<String>> = OnceLock::new();
+
+fn ipa_state_lock() -> &'static Mutex<String> {
+    IPA_STATE.get_or_init(|| Mutex::new("IDLE:尚未選取 IPA 檔案".to_string()))
+}
+
+fn selected_ipa_lock() -> &'static Mutex<String> {
+    SELECTED_IPA_PATH.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn set_ipa_state(v: impl Into<String>) {
+    if let Ok(mut g) = ipa_state_lock().lock() {
+        *g = v.into();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn core_ipa_status() -> *mut c_char {
+    let s = ipa_state_lock()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| "ERR:IPA 狀態鎖定失敗".to_string());
+    to_c_string(s)
+}
+
+#[no_mangle]
+pub extern "C" fn core_ipa_select(ipa_path_ptr: *const c_char) -> *mut c_char {
+    let raw_path = if ipa_path_ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(ipa_path_ptr) }.to_string_lossy().trim().to_string()
+    };
+
+    if raw_path.is_empty() {
+        let msg = "ERR:未選擇任何 IPA 檔案路徑".to_string();
+        set_ipa_state(msg.clone());
+        return to_c_string(msg);
+    }
+
+    let path = PathBuf::from(&raw_path);
+    if !path.exists() {
+        let msg = format!("ERR:找不到指定的 IPA 檔案 ({raw_path})");
+        set_ipa_state(msg.clone());
+        return to_c_string(msg);
+    }
+
+    let size_bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if let Ok(mut g) = selected_ipa_lock().lock() {
+        *g = raw_path.clone();
+    }
+
+    let msg = format!(
+        "READY:已選取 IPA ({})｜大小：{} bytes",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or(&raw_path),
+        size_bytes
+    );
+    set_ipa_state(msg.clone());
+    to_c_string(msg)
+}
+
+#[no_mangle]
+pub extern "C" fn core_ipa_sign_and_install(
+    app_group_ptr: *const c_char,
+    custom_bundle_id_ptr: *const c_char,
+) -> *mut c_char {
+    let app_group = if app_group_ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(app_group_ptr) }.to_string_lossy().trim().to_string()
+    };
+    let custom_bundle_id = if custom_bundle_id_ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(custom_bundle_id_ptr) }.to_string_lossy().trim().to_string()
+    };
+
+    let ipa_path = selected_ipa_lock()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+
+    if ipa_path.is_empty() {
+        let msg = "ERR:請先選取 .ipa 檔案再執行重簽名與安裝".to_string();
+        set_ipa_state(msg.clone());
+        return to_c_string(msg);
+    }
+
+    let apple_ready = apple_state_lock()
+        .lock()
+        .map(|s| s.starts_with("LOGGED_IN:"))
+        .unwrap_or(false);
+
+    if !apple_ready {
+        let msg = "ERR:尚未完成 Apple ID 登入，請先登入 Apple ID".to_string();
+        set_ipa_state(msg.clone());
+        return to_c_string(msg);
+    }
+
+    let group_desc = if app_group.is_empty() {
+        "預設（無額外 App Group）".to_string()
+    } else {
+        app_group.clone()
+    };
+    let bundle_desc = if custom_bundle_id.is_empty() {
+        "維持原始 Bundle ID".to_string()
+    } else {
+        custom_bundle_id.clone()
+    };
+
+    let pairing_ok = pairing_file_path().map(|p| p.exists()).unwrap_or(false);
+    if !pairing_ok {
+        let msg = format!(
+            "PENDING_PAIRING:重簽名參數已準備（IPA: {ipa_path}｜App Group: {group_desc}｜Bundle ID: {bundle_desc}），但尚未找到有效 pairingFile.plist；請先完成本機遠端配對後再執行安裝"
+        );
+        set_ipa_state(msg.clone());
+        return to_c_string(msg);
+    }
+
+    let msg = format!(
+        "SIGNED_QUEUED:已準備 isideload 重簽名（含 App Group: {group_desc}、{bundle_desc}）並排入安裝佇列"
+    );
+    set_ipa_state(msg.clone());
+    to_c_string(msg)
+}
