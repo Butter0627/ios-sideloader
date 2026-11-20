@@ -144,19 +144,15 @@ impl idevice::remote_pairing::RpPairingSocketProvider for LocalSocketProvider {
         &mut self,
         value: impl serde::Serialize,
         _tag: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<(), idevice::IdeviceError>> + Send>> {
-        let serialized = plist::to_bytes(&plist::Value::new(value).unwrap_or(plist::Value::String(String::new())), plist::DataFormat::Binary)
-            .or_else(|_| {
-                let mut buf = Vec::new();
-                plist::to_writer_binary(&mut buf, &())?;
-                Ok::<Vec<u8>, plist::Error>(buf)
-            });
+    ) -> Pin<Box<dyn Future<Output = Result<(), idevice::IdeviceError>> + Send + '_>> {
+        let mut buf = Vec::new();
+        let ser_res = plist::to_writer_binary(&mut buf, &value);
 
         Box::pin(async move {
-            let bytes = serialized.map_err(|e| {
+            ser_res.map_err(|e| {
                 idevice::IdeviceError::InternalError(format!("序列化 plain plist 失敗: {e}"))
             })?;
-            self.write_framed_bytes(&bytes).await
+            self.write_framed_bytes(&buf).await
         })
     }
 
@@ -164,7 +160,7 @@ impl idevice::remote_pairing::RpPairingSocketProvider for LocalSocketProvider {
         &mut self,
         data: Vec<u8>,
         _tag: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<(), idevice::IdeviceError>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), idevice::IdeviceError>> + Send + '_>> {
         Box::pin(async move { self.write_framed_bytes(&data).await })
     }
 
