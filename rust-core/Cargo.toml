@@ -9,7 +9,7 @@ crate-type = ["staticlib"]
 
 [dependencies]
 isideload = { version = "0.5.2", default-features = false, features = ["install", "fs-storage", "tokio-mt"] }
-idevice = { version = "0.1", default-features = false, features = ["remote_pairing", "rustls"] }
+idevice = { version = "0.1", default-features = false, features = ["remote_pairing", "mdns", "rustls"] }
 plist = "1"
 serde = { version = "1", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
