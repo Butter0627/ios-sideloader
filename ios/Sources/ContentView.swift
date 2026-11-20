@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct ContentView: View {
+    @State private var showAppleLogin = false
+
     @State private var coreStatus: String = "尚未初始化"
     @State private var pairingStatus: String = "檢查中..."
     @State private var actionMessage: String?
@@ -9,6 +11,16 @@ struct ContentView: View {
         TabView {
             NavigationStack {
                 List {
+
+            Button {
+                showAppleLogin = true
+            } label: {
+                Label("Apple ID 登入 / 2FA / 7460", systemImage: "person.crop.circle.badge.checkmark")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.horizontal)
+
                     Section("核心引擎狀態 (Stage 1)") {
                         Text(coreStatus)
                             .font(.callout)
@@ -75,6 +87,10 @@ struct ContentView: View {
             .tabItem {
                 Label("安裝", systemImage: "plus.app")
             }
+        }
+    
+        .sheet(isPresented: $showAppleLogin) {
+            AppleIDLoginView()
         }
     }
 }
