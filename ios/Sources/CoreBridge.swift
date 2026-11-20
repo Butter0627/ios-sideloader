@@ -55,4 +55,22 @@ enum CoreBridge {
     static func appleConfirm7460(allowCleanup: Bool) -> String {
         consume(core_apple_confirm_7460(allowCleanup), fallback: "ERR:無法處理 7460 確認")
     }
+
+    static func ipaStatus() -> String {
+        consume(core_ipa_status(), fallback: "ERR:無法取得 IPA 狀態")
+    }
+
+    static func ipaSelect(path: String) -> String {
+        path.withCString { pPtr in
+            consume(core_ipa_select(pPtr), fallback: "ERR:無法登記 IPA 路徑")
+        }
+    }
+
+    static func ipaSignAndInstall(appGroup: String, customBundleId: String) -> String {
+        appGroup.withCString { gPtr in
+            customBundleId.withCString { bPtr in
+                consume(core_ipa_sign_and_install(gPtr, bPtr), fallback: "ERR:無法執行重簽名與安裝")
+            }
+        }
+    }
 }
