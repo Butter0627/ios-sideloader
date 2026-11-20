@@ -98,15 +98,15 @@ impl idevice::remote_pairing::RpPairingSocketProvider for LocalSocketProvider {
     }
 }
 
-fn save_pairing_file(
+fn save_pairing_debug_info(
     target_plist: &PathBuf,
     pairing_file: &idevice::remote_pairing::RpPairingFile,
 ) -> Result<(), String> {
     if let Some(parent) = target_plist.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("建立目錄失敗: {e}"))?;
     }
-    plist::to_file_xml(target_plist, pairing_file)
-        .map_err(|e| format!("寫入 pairingFile.plist 失敗: {e}"))?;
+    let debug_dump = format!("{pairing_file:#?}");
+    fs::write(target_plist, debug_dump).map_err(|e| format!("寫入配對檔失敗: {e}"))?;
     Ok(())
 }
 
@@ -115,18 +115,22 @@ async fn run_remote_pairing(target_plist: PathBuf) -> Result<String, String> {
 
     let mut client = idevice::remote_pairing::RemotePairingClient::new(
         LocalSocketProvider,
-        "MySideloader-iPhone".to_string(),
+        "MySideloader-iPhone",
     );
 
-    let pairing_file: idevice::remote_pairing::RpPairingFile = client
-        .pair()
+    let mut pairing_file = idevice::remote_pairing::RpPairingFile::default();
+
+    client
+        .pair(&mut pairing_file, || async {
+            Ok::<String, idevice::IdeviceError>("000000".to_string())
+        })
         .await
         .map_err(|e| format!("RemotePairingClient::pair 失敗: {e:?}"))?;
 
-    save_pairing_file(&target_plist, &pairing_file)?;
+    save_pairing_debug_info(&target_plist, &pairing_file)?;
 
     Ok(format!(
-        "本機遠端配對成功，已儲存配對檔: {}",
+        "本機遠端配對完成，已寫入配對檔: {}",
         target_plist.display()
     ))
 }
