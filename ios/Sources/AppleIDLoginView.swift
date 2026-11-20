@@ -1,27 +1,5 @@
 import SwiftUI
 
-@_silgen_name("core_apple_status")
-private func core_apple_status() -> UnsafeMutablePointer<CChar>?
-
-@_silgen_name("core_apple_login")
-private func core_apple_login(
-    _ emailPtr: UnsafePointer<CChar>?,
-    _ passwordPtr: UnsafePointer<CChar>?
-) -> UnsafeMutablePointer<CChar>?
-
-@_silgen_name("core_apple_submit_2fa")
-private func core_apple_submit_2fa(
-    _ codePtr: UnsafePointer<CChar>?
-) -> UnsafeMutablePointer<CChar>?
-
-@_silgen_name("core_apple_confirm_7460")
-private func core_apple_confirm_7460(
-    _ allowCleanup: Bool
-) -> UnsafeMutablePointer<CChar>?
-
-@_silgen_name("core_free_string")
-private func core_free_string(_ ptr: UnsafeMutablePointer<CChar>?)
-
 enum AppleAuthPhase: Equatable {
     case loggedOut
     case awaiting2FA(prompt: String)
@@ -40,46 +18,27 @@ final class AppleAuthViewModel: ObservableObject {
     @Published var show7460Alert: Bool = false
     @Published var certLimitMessage: String = ""
 
-    private func consumeCString(_ ptr: UnsafeMutablePointer<CChar>?) -> String {
-        guard let ptr else { return "ERR:空字串指標" }
-        defer { core_free_string(ptr) }
-        return String(cString: ptr)
-    }
-
     func refreshStatus() {
-        let raw = consumeCString(core_apple_status())
-        applyRawState(raw)
+        applyRawState(CoreBridge.appleStatus())
     }
 
     func login() {
         isBusy = true
         defer { isBusy = false }
-
-        let raw = appleId.withCString { idPtr in
-            password.withCString { pwPtr in
-                consumeCString(core_apple_login(idPtr, pwPtr))
-            }
-        }
-        applyRawState(raw)
+        applyRawState(CoreBridge.appleLogin(email: appleId, password: password))
     }
 
     func submit2FA() {
         isBusy = true
         defer { isBusy = false }
-
-        let raw = twoFactorCode.withCString { codePtr in
-            consumeCString(core_apple_submit_2fa(codePtr))
-        }
-        applyRawState(raw)
+        applyRawState(CoreBridge.appleSubmit2FA(code: twoFactorCode))
     }
 
     func confirm7460(allowCleanup: Bool) {
         show7460Alert = false
         isBusy = true
         defer { isBusy = false }
-
-        let raw = consumeCString(core_apple_confirm_7460(allowCleanup))
-        applyRawState(raw)
+        applyRawState(CoreBridge.appleConfirm7460(allowCleanup: allowCleanup))
     }
 
     private func applyRawState(_ raw: String) {
