@@ -41,27 +41,28 @@ final class AppleAuthViewModel: ObservableObject {
         applyRawState(CoreBridge.appleConfirm7460(allowCleanup: allowCleanup))
     }
 
+    private func dropPrefix(_ text: String, prefix: String) -> String? {
+        guard text.hasPrefix(prefix) else { return nil }
+        return String(text.dropFirst(prefix.count))
+    }
+
     private func applyRawState(_ raw: String) {
-        if let rest = raw.stripPrefix("CERT_LIMIT_7460:") {
-            let text = String(rest)
+        if let text = dropPrefix(raw, prefix: "CERT_LIMIT_7460:") {
             statusMessage = text
             certLimitMessage = text
             phase = .awaiting7460Confirm(message: text)
             show7460Alert = true
-        } else if let rest = raw.stripPrefix("NEED_2FA:") {
-            let text = String(rest)
+        } else if let text = dropPrefix(raw, prefix: "NEED_2FA:") {
             statusMessage = text
             phase = .awaiting2FA(prompt: text)
-        } else if let rest = raw.stripPrefix("LOGGED_IN:") {
-            let text = String(rest)
+        } else if let text = dropPrefix(raw, prefix: "LOGGED_IN:") {
             statusMessage = text
             phase = .authenticated(summary: text)
-        } else if let rest = raw.stripPrefix("CANCELLED_7460:") {
-            let text = String(rest)
+        } else if let text = dropPrefix(raw, prefix: "CANCELLED_7460:") {
             statusMessage = text
             phase = .loggedOut
-        } else if let rest = raw.stripPrefix("ERR:") {
-            statusMessage = String(rest)
+        } else if let text = dropPrefix(raw, prefix: "ERR:") {
+            statusMessage = text
         } else {
             statusMessage = raw
         }
