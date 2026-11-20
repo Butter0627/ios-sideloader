@@ -8,6 +8,7 @@ name = "sideloader_core"
 crate-type = ["staticlib"]
 
 [dependencies]
+anyhow = "1"
 isideload = { version = "0.5.2", default-features = false, features = ["install", "fs-storage", "tokio-mt"] }
 idevice = { version = "0.1", default-features = false, features = ["remote_pairing", "mdns", "rustls"] }
 plist = "1"
