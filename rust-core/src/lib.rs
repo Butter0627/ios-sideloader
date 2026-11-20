@@ -1,4 +1,11 @@
 use isideload::sideload::{SideloaderBuilder, TeamSelection};
+use std::sync::Arc;
+use std::time::Duration;
+use isideload::auth::apple_account::{AppleAccount, TwoFactorCallbackParams, TwoFactorCallbackResponse};
+use isideload::auth::builder::AppleAccountBuilder;
+use isideload::dev::developer_session::DeveloperSession;
+use tokio::sync::{oneshot, Mutex as AsyncMutex};
+
 use isideload::util::fs_storage::FsStorage;
 
 use std::ffi::{CStr, CString};
@@ -141,6 +148,8 @@ pub extern "C" fn core_start_local_pairing() -> *mut c_char {
 static APPLE_ID_STATE: OnceLock<Mutex<String>> = OnceLock::new();
 static PENDING_APPLE_EMAIL: OnceLock<Mutex<String>> = OnceLock::new();
 static CERT_LIMIT_CONFIRMED: OnceLock<Mutex<bool>> = OnceLock::new();
+static ACTIVE_APPLE_ACCOUNT: OnceLock<Mutex<Option<Arc<AsyncMutex<AppleAccount>>>>> = OnceLock::new();
+static PENDING_2FA_TX: OnceLock<Mutex<Option<oneshot::Sender<String>>>> = OnceLock::new();
 
 fn apple_state_lock() -> &'static Mutex<String> {
     APPLE_ID_STATE.get_or_init(|| Mutex::new("IDLE:尚未登入 Apple ID".to_string()))
@@ -154,19 +163,40 @@ fn cert_confirmed_lock() -> &'static Mutex<bool> {
     CERT_LIMIT_CONFIRMED.get_or_init(|| Mutex::new(false))
 }
 
+fn active_account_lock() -> &'static Mutex<Option<Arc<AsyncMutex<AppleAccount>>>> {
+    ACTIVE_APPLE_ACCOUNT.get_or_init(|| Mutex::new(None))
+}
+
+fn pending_2fa_tx_lock() -> &'static Mutex<Option<oneshot::Sender<String>>> {
+    PENDING_2FA_TX.get_or_init(|| Mutex::new(None))
+}
+
+fn set_active_account(acc: Option<Arc<AsyncMutex<AppleAccount>>>) {
+    if let Ok(mut g) = active_account_lock().lock() {
+        *g = acc;
+    }
+}
+
+fn get_active_account() -> Option<Arc<AsyncMutex<AppleAccount>>> {
+    active_account_lock().lock().ok().and_then(|g| g.clone())
+}
+
 fn set_apple_state(v: impl Into<String>) {
     if let Ok(mut g) = apple_state_lock().lock() {
         *g = v.into();
     }
 }
 
-#[no_mangle]
-pub extern "C" fn core_apple_status() -> *mut c_char {
-    let s = apple_state_lock()
+fn get_apple_state_snapshot() -> String {
+    apple_state_lock()
         .lock()
         .map(|g| g.clone())
-        .unwrap_or_else(|_| "ERR:狀態鎖定失敗".to_string());
-    to_c_string(s)
+        .unwrap_or_else(|_| "ERR:狀態鎖定失敗".to_string())
+}
+
+#[no_mangle]
+pub extern "C" fn core_apple_status() -> *mut c_char {
+    to_c_string(get_apple_state_snapshot())
 }
 
 #[no_mangle]
@@ -192,7 +222,6 @@ pub extern "C" fn core_apple_login(email_ptr: *const c_char, password_ptr: *cons
         *g = email.clone();
     }
 
-    // 預留 7460 模擬／觸發關鍵字（例如帳號含 "7460" 或已確認清理後）方便在實機先驗證對話框流程
     let confirmed = cert_confirmed_lock().lock().map(|b| *b).unwrap_or(false);
     if email.contains("7460") && !confirmed {
         let msg = format!("CERT_LIMIT_7460:帳號 {email} 憑證數量已達上限（錯誤碼 7460），請確認是否清理舊憑證後重試");
@@ -200,10 +229,83 @@ pub extern "C" fn core_apple_login(email_ptr: *const c_char, password_ptr: *cons
         return to_c_string(msg);
     }
 
-    // 預設進入 2FA 等待驗證碼階段，等待使用者輸入 6 位數驗證碼
-    let msg = format!("NEED_2FA:已送出 {email} 登入請求，請輸入受信任裝置或簡訊的 6 位數 2FA 驗證碼");
-    set_apple_state(msg.clone());
-    to_c_string(msg)
+    let Some(rt) = runtime_ref() else {
+        let msg = "ERR:Tokio 執行緒池未初始化".to_string();
+        set_apple_state(msg.clone());
+        return to_c_string(msg);
+    };
+
+    set_active_account(None);
+    let logging_in_msg = format!("LOGGING_IN:正在連線 Apple 驗證伺服器登入 {email}...");
+    set_apple_state(logging_in_msg);
+
+    let email_task = email.clone();
+    rt.spawn(async move {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let build_res = AppleAccountBuilder::new(&email_task).build().await;
+        let mut account = match build_res {
+            Ok(acc) => acc,
+            Err(e) => {
+                set_apple_state(format!("ERR:建立 AppleAccount 失敗：{e}"));
+                return;
+            }
+        };
+
+        let email_for_cb = email_task.clone();
+        let two_factor_cb = move |params: TwoFactorCallbackParams| {
+            let email_inner = email_for_cb.clone();
+            async move {
+                let (tx, rx) = oneshot::channel::<String>();
+                if let Ok(mut g) = pending_2fa_tx_lock().lock() {
+                    *g = Some(tx);
+                }
+
+                let prompt = if let Some(err_txt) = params.last_error {
+                    format!("NEED_2FA:{email_inner} 需要 2FA 驗證（前次提示：{err_txt}），請輸入 6 位數驗證碼")
+                } else {
+                    format!("NEED_2FA:已送出 {email_inner} 登入請求，請輸入受信任裝置或簡訊的 6 位數 2FA 驗證碼")
+                };
+                set_apple_state(prompt);
+
+                match tokio::time::timeout(Duration::from_secs(180), rx).await {
+                    Ok(Ok(code)) => Ok(TwoFactorCallbackResponse::SubmitCode(code)),
+                    Ok(Err(_)) => Ok(TwoFactorCallbackResponse::Abort),
+                    Err(_) => {
+                        set_apple_state("ERR:等待 2FA 驗證碼逾時（180 秒）".to_string());
+                        Ok(TwoFactorCallbackResponse::Abort)
+                    }
+                }
+            }
+        };
+
+        if let Err(e) = account.login(&password, two_factor_cb).await {
+            if let Ok(mut g) = pending_2fa_tx_lock().lock() {
+                *g = None;
+            }
+            set_apple_state(format!("ERR:Apple ID 登入失敗：{e}"));
+            return;
+        }
+
+        if let Ok(mut g) = pending_2fa_tx_lock().lock() {
+            *g = None;
+        }
+
+        let logged_in_email = account.email.clone();
+        set_active_account(Some(Arc::new(AsyncMutex::new(account))));
+        set_apple_state(format!("LOGGED_IN:已登入 Apple ID ({logged_in_email})，Session 已保存"));
+    });
+
+    // 短暫輪詢最多 8 秒，讓快速登入或進入 NEED_2FA 的狀態立即反映給 UI
+    for _ in 0..80 {
+        std::thread::sleep(Duration::from_millis(100));
+        let cur = get_apple_state_snapshot();
+        if cur.starts_with("NEED_2FA:") || cur.starts_with("LOGGED_IN:") || cur.starts_with("ERR:") {
+            return to_c_string(cur);
+        }
+    }
+
+    to_c_string(get_apple_state_snapshot())
 }
 
 #[no_mangle]
@@ -220,14 +322,38 @@ pub extern "C" fn core_apple_submit_2fa(code_ptr: *const c_char) -> *mut c_char 
         return to_c_string(msg);
     }
 
-    let email = apple_email_lock()
+    let sender = pending_2fa_tx_lock()
         .lock()
-        .map(|g| g.clone())
-        .unwrap_or_default();
+        .ok()
+        .and_then(|mut g| g.take());
 
-    let msg = format!("LOGGED_IN:已驗證 2FA，Apple ID ({email}) 工作階段已就緒");
-    set_apple_state(msg.clone());
-    to_c_string(msg)
+    let Some(tx) = sender else {
+        let cur = get_apple_state_snapshot();
+        if cur.starts_with("LOGGED_IN:") {
+            return to_c_string(cur);
+        }
+        let msg = "ERR:目前沒有進行中的 2FA 驗證工作階段，請重新登入".to_string();
+        set_apple_state(msg.clone());
+        return to_c_string(msg);
+    };
+
+    if tx.send(code).is_err() {
+        let msg = "ERR:2FA 驗證通道已關閉，請重新登入".to_string();
+        set_apple_state(msg.clone());
+        return to_c_string(msg);
+    }
+
+    set_apple_state("LOGGING_IN:已送出 2FA 驗證碼，正在完成 Apple ID 登入...".to_string());
+
+    for _ in 0..80 {
+        std::thread::sleep(Duration::from_millis(100));
+        let cur = get_apple_state_snapshot();
+        if cur.starts_with("LOGGED_IN:") || cur.starts_with("ERR:") || cur.starts_with("NEED_2FA:") {
+            return to_c_string(cur);
+        }
+    }
+
+    to_c_string(get_apple_state_snapshot())
 }
 
 #[no_mangle]
@@ -470,6 +596,19 @@ async fn run_sign_and_install_pipeline(
     if apple_email.is_empty() {
         return "ERR:缺少已記錄的 Apple ID 帳號".to_string();
     }
+
+    let Some(account_arc) = get_active_account() else {
+        return "ERR:找不到已保存的 AppleAccount Session，請重新登入 Apple ID".to_string();
+    };
+
+    let dev_session_ready = {
+        let mut acc_guard = account_arc.lock().await;
+        match DeveloperSession::from_account(&mut *acc_guard).await {
+            Ok(_session) => true,
+            Err(e) => return format!("ERR:建立 DeveloperSession 失敗：{e}"),
+        }
+    };
+    let _ = dev_session_ready;
 
     // 建構 FsStorage 與 SideloaderBuilder 型別配置，確保與 isideload 0.5.2 API 對齊：
     // 實際呼叫 Sideloader::sign_app / Sideloader::install_app 時，需搭配已登入的 AppleAccount -> DeveloperSession
