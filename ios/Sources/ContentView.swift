@@ -24,34 +24,26 @@ struct ContentView: View {
                             actionMessage = CoreBridge.startLocalPairing()
                             pairingStatus = CoreBridge.pairingStatus()
                         } label: {
-                            Label("1. 啟動本機配對廣播 (產生配對碼)", systemImage: "antenna.radiowaves.left.and.right")
+                            Label("1. 啟動本機配對 (idevice remote_pairing)", systemImage: "antenna.radiowaves.left.and.right")
                         }
 
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("2. 點擊下方按鈕開啟「設定」App 主頁，再依序前往：隱私權與安全性 → 開發者模式")
+                            Text("2. 請直接點開 iPhone 桌面上的「設定」App")
                                 .font(.subheadline.bold())
 
-                            Text("• iOS 公開 API 無法直接偵測「開發者模式」開關是否已開啟，也無法直接跳轉到該子頁面。")
+                            Text("• 依序前往：設定 → 隱私權與安全性 → 開發者模式。")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
 
-                            Text("• 如果「開發者模式」尚未開啟，請先將它打開並依提示重新啟動 iPhone，再回來繼續。")
+                            Text("• 如果「開發者模式」還沒開啟，請先打開開關並依提示重新啟動 iPhone，再回來繼續。")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
 
-                            Text("• 如果已經開啟「開發者模式」，請在該頁面進行配對並輸入 6 位數配對碼。")
+                            Text("• 如果已經開啟「開發者模式」，請在該頁面進行配對並輸入配對碼。")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 4)
-
-                        Button {
-                            if let url = URL(string: UIApplication.openSettingsURLString) {
-                                UIApplication.shared.open(url)
-                            }
-                        } label: {
-                            Label("點我開啟設定", systemImage: "gear")
-                        }
 
                         if let msg = actionMessage {
                             Text(msg)
