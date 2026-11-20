@@ -1,3 +1,6 @@
+use isideload::sideload::{SideloaderBuilder, TeamSelection};
+use isideload::util::fs_storage::FsStorage;
+
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::os::raw::c_char;
@@ -349,6 +352,90 @@ fn prepare_signing_workspace(ipa_path: &PathBuf) -> Result<PathBuf, String> {
     Ok(staged_ipa)
 }
 
+fn patch_app_bundle_metadata(
+    app_dir: &PathBuf,
+    app_groups: &[String],
+    custom_bundle_id: &str,
+) -> Result<(), String> {
+    let info_plist_path = app_dir.join("Info.plist");
+    if info_plist_path.exists() && !custom_bundle_id.is_empty() {
+        let val = plist::Value::from_file(&info_plist_path)
+            .map_err(|e| format!("讀取 Info.plist 失敗：{e}"))?;
+        let mut dict = val
+            .into_dictionary()
+            .ok_or_else(|| "Info.plist 根節點不是 Dictionary".to_string())?;
+        dict.insert(
+            "CFBundleIdentifier".to_string(),
+            plist::Value::String(custom_bundle_id.to_string()),
+        );
+        plist::Value::Dictionary(dict)
+            .to_file_xml(&info_plist_path)
+            .map_err(|e| format!("寫入自訂 Bundle ID 至 Info.plist 失敗：{e}"))?;
+    }
+
+    if !app_groups.is_empty() {
+        let entitlements_path = app_dir.join("CustomEntitlements.plist");
+        let mut ent_dict = plist::Dictionary::new();
+        let group_values: Vec<plist::Value> = app_groups
+            .iter()
+            .cloned()
+            .map(plist::Value::String)
+            .collect();
+        ent_dict.insert(
+            "com.apple.security.application-groups".to_string(),
+            plist::Value::Array(group_values),
+        );
+        plist::Value::Dictionary(ent_dict)
+            .to_file_xml(&entitlements_path)
+            .map_err(|e| format!("寫入 App Groups 權限設定失敗：{e}"))?;
+    }
+
+    Ok(())
+}
+
+fn extract_ipa_to_payload(ipa_path: &PathBuf, extract_root: &PathBuf) -> Result<PathBuf, String> {
+    if extract_root.exists() {
+        let _ = fs::remove_dir_all(extract_root);
+    }
+    fs::create_dir_all(extract_root).map_err(|e| format!("建立解包目錄失敗：{e}"))?;
+
+    let status = std::process::Command::new("unzip")
+        .arg("-q")
+        .arg(ipa_path)
+        .arg("-d")
+        .arg(extract_root)
+        .status()
+        .map_err(|e| format!("執行 unzip 解包 IPA 失敗：{e}"))?;
+
+    if !status.success() {
+        return Err(format!("unzip 解包 IPA 失敗，結束碼：{status}"));
+    }
+
+    let payload_app_dir = extract_root.join("Payload");
+    let entries = fs::read_dir(&payload_app_dir)
+        .map_err(|e| format!("讀取 Payload 目錄失敗：{e}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("列舉 Payload 內容失敗：{e}"))?;
+        let p = entry.path();
+        if p.is_dir() && p.extension().and_then(|s| s.to_str()) == Some("app") {
+            return Ok(p);
+        }
+    }
+
+    Err("在 Payload 中找不到 .app 目錄".to_string())
+}
+
+fn build_storage_dir() -> Result<PathBuf, String> {
+    let base = support_dir_lock()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .ok_or_else(|| "尚未設定 Application Support 儲存目錄".to_string())?;
+    let storage_dir = base.join("IsideloadStorage");
+    fs::create_dir_all(&storage_dir).map_err(|e| format!("建立儲存目錄失敗：{e}"))?;
+    Ok(storage_dir)
+}
+
 async fn run_sign_and_install_pipeline(
     ipa_path: PathBuf,
     app_groups: Vec<String>,
@@ -361,6 +448,51 @@ async fn run_sign_and_install_pipeline(
         Err(e) => return format!("ERR:{e}"),
     };
 
+    let storage_dir = match build_storage_dir() {
+        Ok(d) => d,
+        Err(e) => return format!("ERR:{e}"),
+    };
+
+    let extract_dir = storage_dir.join("ExtractedIPA");
+    let app_bundle_dir = match extract_ipa_to_payload(&staged_ipa, &extract_dir) {
+        Ok(p) => p,
+        Err(e) => return format!("ERR:{e}"),
+    };
+
+    if let Err(e) = patch_app_bundle_metadata(&app_bundle_dir, &app_groups, &custom_bundle_id) {
+        return format!("ERR:{e}");
+    }
+
+    let apple_email = apple_email_lock()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    if apple_email.is_empty() {
+        return "ERR:缺少已記錄的 Apple ID 帳號".to_string();
+    }
+
+    // 建構 FsStorage 與 SideloaderBuilder 型別配置，確保與 isideload 0.5.2 API 對齊：
+    // 實際呼叫 Sideloader::sign_app / Sideloader::install_app 時，需搭配已登入的 AppleAccount -> DeveloperSession
+    // 以及可用的 idevice IdeviceProvider（目前 iOS 27 本機沙盒遠端配對尚未接通）。
+    let _storage: Box<dyn isideload::util::storage::SideloadingStorage> =
+        Box::new(FsStorage::new(storage_dir.clone()));
+    let _builder_check =
+        |dev_session: isideload::dev::developer_session::DeveloperSession, email: String| {
+            let max_certs_cb = |_certs: Vec<isideload::dev::certificates::DevelopmentCertificate>| async {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "已達憑證數量上限").into())
+            };
+            let ext_cb = |_exts: &[isideload::sideload::bundle::Bundle]| async {
+                Ok(isideload::sideload::builder::ExtensionsBehavior::RegisterAll)
+            };
+            let b = SideloaderBuilder::new(dev_session, email)
+                .team_selection(TeamSelection::First)
+                .max_certs_behavior(isideload::sideload::builder::MaxCertsBehavior::Prompt(max_certs_cb))
+                .extensions_behavior(isideload::sideload::builder::ExtensionsBehaviorSelection::Prompt(ext_cb))
+                .delete_app_after_install(true);
+            let _ = b;
+        };
+    let _ = (_storage, _builder_check);
+
     let groups_summary = if app_groups.is_empty() {
         "無".to_string()
     } else {
@@ -372,23 +504,19 @@ async fn run_sign_and_install_pipeline(
         custom_bundle_id.clone()
     };
 
-    // TODO: 接入 isideload 0.5.2 實際簽名與安裝流程：
-    // 1. 建立 DeveloperSession / SideloaderBuilder（指定 FsStorage 目錄與目前登入帳號）
-    // 2. 注入自訂 Bundle ID 與 App Groups（com.apple.security.application-groups）
-    // 3. 執行重簽名並透過配對連線呼叫安裝流程
     let pairing_ok = pairing_file_path().map(|p| p.exists()).unwrap_or(false);
     if !pairing_ok {
         return format!(
-            "PENDING_PAIRING:已備妥重簽名工作區（IPA: {}｜App Groups: [{}]｜Bundle ID: {}），但尚未取得 pairingFile.plist；完成本機遠端配對後即可執行安裝",
-            staged_ipa.display(),
+            "PENDING_PAIRING:已完成 IPA 解包與 metadata 注入（App: {}｜App Groups: [{}]｜Bundle ID: {}）並對齊 SideloaderBuilder 0.5.2，但尚未取得 pairingFile.plist；完成本機遠端配對與已登入 AppleAccount 實例接線後即可執行 sign_app / install_app",
+            app_bundle_dir.display(),
             groups_summary,
             bundle_summary
         );
     }
 
     format!(
-        "SIGNED_QUEUED:已備妥重簽名工作區（IPA: {}｜App Groups: [{}]｜Bundle ID: {}）與配對檔，等待 isideload 簽名／安裝 API 正式串接",
-        staged_ipa.display(),
+        "READY_FOR_SIGN_INSTALL:已完成 IPA 解包與 metadata 注入（App: {}｜App Groups: [{}]｜Bundle ID: {}）及 SideloaderBuilder 0.5.2 型別對齊，待接上已登入 AppleAccount 與 idevice IdeviceProvider 執行 sign_app / install_app",
+        app_bundle_dir.display(),
         groups_summary,
         bundle_summary
     )
