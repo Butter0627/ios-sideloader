@@ -1,7 +1,9 @@
 use std::ffi::{CStr, CString};
 use std::fs;
+use std::future::Future;
 use std::os::raw::c_char;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Mutex, Once, OnceLock};
 
 static INIT: Once = Once::new();
@@ -46,9 +48,56 @@ fn set_pairing_state(msg: impl Into<String>) {
     }
 }
 
+#[derive(Debug)]
 struct LocalSocketProvider;
 
-impl idevice::remote_pairing::RpPairingSocketProvider for LocalSocketProvider {}
+impl<'a> idevice::remote_pairing::RpPairingSocketProvider<'a> for LocalSocketProvider {
+    fn send_plain<S: serde::Serialize + Send + 'a>(
+        &'a mut self,
+        _value: S,
+        _tag: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<(), idevice::IdeviceError>> + Send + 'a>> {
+        Box::pin(async move {
+            Err(idevice::IdeviceError::InternalError(
+                "LocalSocketProvider 尚未接上本機 Socket".to_string(),
+            ))
+        })
+    }
+
+    fn send_encrypted(
+        &'a mut self,
+        _data: Vec<u8>,
+        _tag: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<(), idevice::IdeviceError>> + Send + 'a>> {
+        Box::pin(async move {
+            Err(idevice::IdeviceError::InternalError(
+                "LocalSocketProvider 尚未接上加密 Socket".to_string(),
+            ))
+        })
+    }
+
+    fn recv_plain(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<plist::value::Value, idevice::IdeviceError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            Err(idevice::IdeviceError::InternalError(
+                "LocalSocketProvider 尚未接上接收 Socket".to_string(),
+            ))
+        })
+    }
+
+    fn serialize_bytes(bytes: &[u8]) -> plist::value::Value {
+        plist::value::Value::Data(bytes.to_vec())
+    }
+
+    fn deserialize_bytes(value: plist::value::Value) -> Option<Vec<u8>> {
+        match value {
+            plist::value::Value::Data(d) => Some(d),
+            _ => None,
+        }
+    }
+}
 
 async fn run_remote_pairing(target_plist: PathBuf) -> Result<String, String> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -58,11 +107,12 @@ async fn run_remote_pairing(target_plist: PathBuf) -> Result<String, String> {
     }
 
     let pairing_file_type = std::any::type_name::<idevice::remote_pairing::RpPairingFile>();
-    let remote_pairing_client_type =
-        std::any::type_name::<idevice::remote_pairing::RemotePairingClient<LocalSocketProvider>>();
+    let remote_pairing_client_type = std::any::type_name::<
+        idevice::remote_pairing::RemotePairingClient<'static, LocalSocketProvider>,
+    >();
 
     Ok(format!(
-        "idevice 0.1.68 型別檢查通過：\n- RpPairingFile: {pairing_file_type}\n- RemotePairingClient: {remote_pairing_client_type}\n- 目標配對檔: {}",
+        "idevice 0.1.68 SocketProvider 骨架編譯通過：\n- RpPairingFile: {pairing_file_type}\n- RemotePairingClient: {remote_pairing_client_type}\n- 目標配對檔: {}",
         target_plist.display()
     ))
 }
