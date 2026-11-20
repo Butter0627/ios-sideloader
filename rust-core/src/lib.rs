@@ -5,10 +5,27 @@ use std::path::PathBuf;
 use std::sync::{Mutex, Once, OnceLock};
 
 static INIT: Once = Once::new();
+static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static APP_SUPPORT_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static PAIRING_STATE: OnceLock<Mutex<String>> = OnceLock::new();
 
 fn support_dir_lock() -> &'static Mutex<Option<PathBuf>> {
     APP_SUPPORT_DIR.get_or_init(|| Mutex::new(None))
+}
+
+fn pairing_state_lock() -> &'static Mutex<String> {
+    PAIRING_STATE.get_or_init(|| Mutex::new("尚未啟動配對".to_string()))
+}
+
+fn runtime_ref() -> Option<&'static tokio::runtime::Runtime> {
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime")
+        })
+        .into()
 }
 
 fn to_c_string(s: String) -> *mut c_char {
@@ -21,6 +38,30 @@ fn pairing_file_path() -> Option<PathBuf> {
     let guard = support_dir_lock().lock().ok()?;
     let base = guard.as_ref()?;
     Some(base.join("pairingFile.plist"))
+}
+
+fn set_pairing_state(msg: impl Into<String>) {
+    if let Ok(mut guard) = pairing_state_lock().lock() {
+        *guard = msg.into();
+    }
+}
+
+async fn run_remote_pairing(target_plist: PathBuf) -> Result<String, String> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    if let Some(parent) = target_plist.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("建立目錄失敗: {e}"))?;
+    }
+
+    // 測試 idevice::remote_pairing 模組型別與可存取性
+    let pairing_file_type = std::any::type_name::<idevice::remote_pairing::PairingFile>();
+    let remote_pairing_client_type =
+        std::any::type_name::<idevice::remote_pairing::RemotePairingClient>();
+
+    Ok(format!(
+        "idevice::remote_pairing 型別檢查通過：\n- PairingFile: {pairing_file_type}\n- RemotePairingClient: {remote_pairing_client_type}\n- 目標配對檔: {}",
+        target_plist.display()
+    ))
 }
 
 #[no_mangle]
@@ -53,23 +94,47 @@ pub extern "C" fn core_set_support_dir(path_ptr: *const c_char) {
 
 #[no_mangle]
 pub extern "C" fn core_pairing_status() -> *mut c_char {
+    let detail = pairing_state_lock()
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| "狀態鎖定失敗".to_string());
+
     match pairing_file_path() {
         Some(path) if path.exists() => {
-            to_c_string(format!("已就緒：找到配對檔 ({})", path.display()))
+            to_c_string(format!("已就緒：找到配對檔 ({})｜{detail}", path.display()))
         }
         Some(path) => {
-            to_c_string(format!("尚未配對：等待產生配對檔 ({})", path.display()))
+            to_c_string(format!("尚未配對：等待產生配對檔 ({})｜{detail}", path.display()))
         }
         None => {
-            to_c_string("尚未初始化儲存路徑".to_string())
+            to_c_string(format!("尚未初始化儲存路徑｜{detail}"))
         }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn core_start_local_pairing() -> *mut c_char {
-    // 下一歩將在此接入 idevice 遠端配對邏輯並寫入 pairingFile.plist
-    to_c_string("已準備啟動 iOS 27+ 本機遠端配對：請確認已開啟通知權限，並前往「設定 → 隱私權與安全性 → 開發者模式」輸入配對碼。".to_string())
+    let Some(target_plist) = pairing_file_path() else {
+        return to_c_string("錯誤：尚未設定儲存目錄".to_string());
+    };
+    let Some(rt) = runtime_ref() else {
+        return to_c_string("錯誤：Tokio 執行緒池未初始化".to_string());
+    };
+
+    set_pairing_state("配對測試執行中...");
+
+    let res = rt.block_on(run_remote_pairing(target_plist));
+    match res {
+        Ok(msg) => {
+            set_pairing_state(msg.clone());
+            to_c_string(msg)
+        }
+        Err(err) => {
+            let err_msg = format!("配對測試失敗：{err}");
+            set_pairing_state(err_msg.clone());
+            to_c_string(err_msg)
+        }
+    }
 }
 
 #[no_mangle]
