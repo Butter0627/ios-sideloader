@@ -449,6 +449,18 @@ pub extern "C" fn core_ipa_select(ipa_path_ptr: *const c_char) -> *mut c_char {
 }
 
 
+static SIGNED_APP_PATH: OnceLock<Mutex<String>> = OnceLock::new();
+
+fn signed_app_path_lock() -> &'static Mutex<String> {
+    SIGNED_APP_PATH.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn set_signed_app_path(v: impl Into<String>) {
+    if let Ok(mut g) = signed_app_path_lock().lock() {
+        *g = v.into();
+    }
+}
+
 fn parse_app_groups(raw: &str) -> Vec<String> {
     raw.split(|c: char| c == ',' || c == ';' || c == '\n' || c.is_whitespace())
         .map(|s| s.trim().to_string())
@@ -601,14 +613,50 @@ async fn run_sign_and_install_pipeline(
         return "ERR:找不到已保存的 AppleAccount Session，請重新登入 Apple ID".to_string();
     };
 
-    let dev_session_ready = {
+    let dev_session = {
         let mut acc_guard = account_arc.lock().await;
         match DeveloperSession::from_account(&mut *acc_guard).await {
-            Ok(_session) => true,
+            Ok(session) => session,
             Err(e) => return format!("ERR:建立 DeveloperSession 失敗：{e}"),
         }
     };
-    let _ = dev_session_ready;
+
+    let max_certs_cb = |_certs: Vec<isideload::dev::certificates::DevelopmentCertificate>| async {
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "Apple 開發者帳號憑證數量已達上限").into())
+    };
+    let ext_cb = |_exts: &[isideload::sideload::bundle::Bundle]| async {
+        Ok(isideload::sideload::builder::ExtensionsBehavior::RegisterAll)
+    };
+
+    let mut sideloader = SideloaderBuilder::new(dev_session, apple_email.clone())
+        .storage(Box::new(FsStorage::new(storage_dir.clone())))
+        .team_selection(TeamSelection::First)
+        .max_certs_behavior(isideload::sideload::builder::MaxCertsBehavior::Prompt(max_certs_cb))
+        .extensions_behavior(isideload::sideload::builder::ExtensionsBehaviorSelection::Prompt(ext_cb))
+        .delete_app_after_install(true)
+        .build();
+
+    let pairing_bytes: Option<Vec<u8>> = pairing_file_path()
+        .filter(|fp| fp.exists())
+        .and_then(|fp| fs::read(fp).ok());
+
+    let no_progress: Option<fn(f32) -> std::future::Ready<()>> = None;
+    let (signed_app_path, _special_app) = match sideloader
+        .sign_app(
+            app_bundle_dir.clone(),
+            None,
+            false,
+            no_progress,
+            pairing_bytes.as_deref(),
+            None,
+        )
+        .await
+    {
+        Ok(out) => out,
+        Err(e) => return format!("ERR:執行 Sideloader::sign_app 失敗：{e}"),
+    };
+
+    set_signed_app_path(signed_app_path.display().to_string());
 
     // 建構 FsStorage 與 SideloaderBuilder 型別配置，確保與 isideload 0.5.2 API 對齊：
     // 實際呼叫 Sideloader::sign_app / Sideloader::install_app 時，需搭配已登入的 AppleAccount -> DeveloperSession
@@ -643,19 +691,18 @@ async fn run_sign_and_install_pipeline(
         custom_bundle_id.clone()
     };
 
-    let pairing_ok = pairing_file_path().map(|p| p.exists()).unwrap_or(false);
-    if !pairing_ok {
+    if pairing_bytes.is_none() {
         return format!(
-            "PENDING_PAIRING:已完成 IPA 解包與 metadata 注入（App: {}｜App Groups: [{}]｜Bundle ID: {}）並對齊 SideloaderBuilder 0.5.2，但尚未取得 pairingFile.plist；完成本機遠端配對與已登入 AppleAccount 實例接線後即可執行 sign_app / install_app",
-            app_bundle_dir.display(),
+            "SIGNED_PENDING_PAIRING:已完成重簽名（Signed App: {}｜App Groups: [{}]｜Bundle ID: {}），但尚未取得 pairingFile.plist；完成本機遠端配對後即可呼叫 install_app",
+            signed_app_path.display(),
             groups_summary,
             bundle_summary
         );
     }
 
     format!(
-        "READY_FOR_SIGN_INSTALL:已完成 IPA 解包與 metadata 注入（App: {}｜App Groups: [{}]｜Bundle ID: {}）及 SideloaderBuilder 0.5.2 型別對齊，待接上已登入 AppleAccount 與 idevice IdeviceProvider 執行 sign_app / install_app",
-        app_bundle_dir.display(),
+        "SIGNED_READY_FOR_INSTALL:已完成重簽名（Signed App: {}｜App Groups: [{}]｜Bundle ID: {}），待接上 idevice provider 執行 install_app",
+        signed_app_path.display(),
         groups_summary,
         bundle_summary
     )
