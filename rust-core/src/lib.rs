@@ -56,6 +56,44 @@ fn set_pairing_state(msg: impl Into<String>) {
     }
 }
 
+
+async fn build_tcp_provider_from_pairing(pairing_raw: &[u8]) -> Result<idevice::provider::TcpProvider, String> {
+    let pairing_file = idevice::pairing_file::PairingFile::from_bytes(pairing_raw)
+        .map_err(|e| format!("解析 PairingFile 失敗: {e}"))?;
+
+    let candidates: [std::net::IpAddr; 2] = [
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 7, 0, 1)),
+    ];
+
+    for ip in candidates {
+        let provider = idevice::provider::TcpProvider {
+            addr: ip,
+            scope_id: None,
+            pairing_file: pairing_file.clone(),
+            label: "ios-sideloader".to_string(),
+        };
+        if tokio::time::timeout(
+            std::time::Duration::from_millis(400),
+            tokio::net::TcpStream::connect((ip, 62078)),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .is_some()
+        {
+            return Ok(provider);
+        }
+    }
+
+    Ok(idevice::provider::TcpProvider {
+        addr: candidates[0],
+        scope_id: None,
+        pairing_file,
+        label: "ios-sideloader".to_string(),
+    })
+}
+
 async fn run_pairing_check(target_plist: PathBuf) -> Result<String, String> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     if let Some(parent) = target_plist.parent() {
@@ -691,7 +729,9 @@ async fn run_sign_and_install_pipeline(
         custom_bundle_id.clone()
     };
 
-    if pairing_bytes.is_none() {
+    let pairing_raw = match pairing_bytes {
+        Some(bytes) => bytes,
+        None => {
         return format!(
             "SIGNED_PENDING_PAIRING:已完成重簽名（Signed App: {}｜App Groups: [{}]｜Bundle ID: {}），但尚未取得 pairingFile.plist；完成本機遠端配對後即可呼叫 install_app",
             signed_app_path.display(),
@@ -699,9 +739,37 @@ async fn run_sign_and_install_pipeline(
             bundle_summary
         );
     }
+    };
+
+    let provider = match build_tcp_provider_from_pairing(&pairing_raw).await {
+        Ok(p) => p,
+        Err(e) => {
+            return format!(
+                "ERR:已簽名（{}）但建立 TcpProvider 失敗：{e}",
+                signed_app_path.display()
+            );
+        }
+    };
+
+    let increased_memory_limit = !app_groups.is_empty();
+    if let Err(e) = sideloader
+        .install_app(
+            &provider,
+            signed_app_path.clone(),
+            increased_memory_limit,
+            no_progress,
+            Some(pairing_raw.as_slice()),
+        )
+        .await
+    {
+        return format!(
+            "ERR:已簽名（{}）但執行 Sideloader::install_app 失敗：{e}",
+            signed_app_path.display()
+        );
+    }
 
     format!(
-        "SIGNED_READY_FOR_INSTALL:已完成重簽名（Signed App: {}｜App Groups: [{}]｜Bundle ID: {}），待接上 idevice provider 執行 install_app",
+        "INSTALLED:已完成重簽名與安裝（App: {}｜App Groups: [{}]｜Bundle ID: {}）",
         signed_app_path.display(),
         groups_summary,
         bundle_summary
